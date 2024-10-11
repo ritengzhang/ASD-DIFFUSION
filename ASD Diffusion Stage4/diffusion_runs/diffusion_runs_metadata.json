@@ -1,0 +1,20 @@
+{
+    "6ad98747": {
+        "timestamp": "2024-10-10T19:57:45.301161",
+        "config": {
+            "batch_size": 32,
+            "num_epochs": 100,
+            "learning_rate": 0.0001,
+            "train_split": 0.8,
+            "visualize": true,
+            "train_only": false,
+            "optimizer": "Adam",
+            "scheduler": "ReduceLROnPlateau"
+        },
+        "final_train_loss": 1.006179650624593,
+        "final_test_loss": 0.9996334314346313,
+        "model_path": "c:\\Users\\17791\\Desktop\\10.10\\ASD Diffusion Stage4\\diffusion_runs\\models\\diffusion_model_6ad98747.pth",
+        "reconstructions_folder": "c:\\Users\\17791\\Desktop\\10.10\\ASD Diffusion Stage4\\diffusion_runs\\reconstructions_visualized\\run_6ad98747",
+        "learning_curve_path": "c:\\Users\\17791\\Desktop\\10.10\\ASD Diffusion Stage4\\diffusion_runs\\learning_curves\\learning_curve_6ad98747.png"
+    }
+}
