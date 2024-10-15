@@ -19,7 +19,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.extend([current_dir, parent_dir])
 
-from vae import SimpleVAE, EnhancedVAE, vae_loss
+from vae import  vae_loss
 from datasets import get_dataset
 from vae_config import get_vae_config, print_vae_config
 
@@ -59,27 +59,6 @@ def update_run_info(run_folder, run_info):
     with open(os.path.join(run_folder, 'run_info.json'), 'w') as f:
         json.dump(run_info, f, indent=4)
 
-def update_all_runs(vae_runs_folder, run_info):
-    all_runs_file = os.path.join(vae_runs_folder, 'all_runs.json')
-    try:
-        if os.path.exists(all_runs_file) and os.path.getsize(all_runs_file) > 0:
-            with open(all_runs_file, 'r') as f:
-                all_runs = json.load(f)
-        else:
-            all_runs = []
-    except json.JSONDecodeError:
-        print(f"Error reading {all_runs_file}. Starting with empty list.")
-        all_runs = []
-    
-    for run in all_runs:
-        if run['run_id'] == run_info['run_id']:
-            run.update(run_info)
-            break
-    else:
-        all_runs.append(run_info)
-    
-    with open(all_runs_file, 'w') as f:
-        json.dump(all_runs, f, indent=4)
 
 def get_device_info():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -112,7 +91,96 @@ class EarlyStopping:
         else:
             self.best_score = score
             self.counter = 0
+def update_all_runs(vae_runs_folder, run_info):
+    all_runs_file = os.path.join(vae_runs_folder, 'all_runs.json')
+    try:
+        if os.path.exists(all_runs_file) and os.path.getsize(all_runs_file) > 0:
+            with open(all_runs_file, 'r') as f:
+                all_runs = json.load(f)
+        else:
+            all_runs = []
+    except json.JSONDecodeError:
+        print(f"Error reading {all_runs_file}. Starting with empty list.")
+        all_runs = []
+    
+    # Prepare the condensed run info
+    condensed_run_info = {
+        'run_id': run_info['run_id'],
+        'config': run_info['config'],
+        'start_time': run_info['start_time'],
+        'best_loss': run_info['best_loss'],
+        'best_epoch': run_info['best_epoch'],
+        'latest_epoch': run_info['latest_epoch'],
+        'device_info': run_info['device_info']
+    }
+    
+    # Add metrics for best and latest epochs
+    best_checkpoint = next((cp for cp in run_info['checkpoints'] if cp['epoch'] == run_info['best_epoch']), None)
+    latest_checkpoint = next((cp for cp in run_info['checkpoints'] if cp['epoch'] == run_info['latest_epoch']), None)
+    
+    if best_checkpoint:
+        condensed_run_info['best_metrics'] = {
+            'train_loss': best_checkpoint['train_loss'],
+            'val_loss': best_checkpoint['val_loss'],
+            'learning_rate': best_checkpoint['learning_rate']
+        }
+    
+    if latest_checkpoint:
+        condensed_run_info['latest_metrics'] = {
+            'train_loss': latest_checkpoint['train_loss'],
+            'val_loss': latest_checkpoint['val_loss'],
+            'learning_rate': latest_checkpoint['learning_rate']
+        }
+    
+    # Update or append the condensed run info
+    for run in all_runs:
+        if run['run_id'] == condensed_run_info['run_id']:
+            run.update(condensed_run_info)
+            break
+    else:
+        all_runs.append(condensed_run_info)
+    
+    with open(all_runs_file, 'w') as f:
+        json.dump(all_runs, f, indent=4)
 
+def update_all_finished_runs(vae_runs_folder, run_info):
+    all_finished_runs_file = os.path.join(vae_runs_folder, 'all_finished_runs.json')
+    try:
+        if os.path.exists(all_finished_runs_file) and os.path.getsize(all_finished_runs_file) > 0:
+            with open(all_finished_runs_file, 'r') as f:
+                all_finished_runs = json.load(f)
+        else:
+            all_finished_runs = []
+    except json.JSONDecodeError:
+        print(f"Error reading {all_finished_runs_file}. Starting with empty list.")
+        all_finished_runs = []
+    
+    # Only add the run if it has finished (check for 'end_time' key)
+    if 'end_time' in run_info:
+        condensed_run_info = {
+            'run_id': run_info['run_id'],
+            'config': run_info['config'],
+            'start_time': run_info['start_time'],
+            'end_time': run_info['end_time'],
+            'best_loss': run_info['best_loss'],
+            'best_epoch': run_info['best_epoch'],
+            'total_epochs': run_info['latest_epoch'],
+            'total_time': run_info['total_time'],
+            'device_info': run_info['device_info'],
+            'final_train_loss': run_info['final_train_loss'],
+            'final_val_loss': run_info['final_val_loss']
+        }
+        
+        # Add or update the run info
+        for run in all_finished_runs:
+            if run['run_id'] == condensed_run_info['run_id']:
+                run.update(condensed_run_info)
+                break
+        else:
+            all_finished_runs.append(condensed_run_info)
+        
+        with open(all_finished_runs_file, 'w') as f:
+            json.dump(all_finished_runs, f, indent=4)
 def train_vae(config):
     torch.manual_seed(config.random_seed)
     np.random.seed(config.random_seed)
@@ -130,7 +198,7 @@ def train_vae(config):
             raise ValueError(f"No run found with ID: {run_id}")
         print(f"Resuming run: {run_id}")
     else:
-        run_id = f"{config.dataset.name}_{config.vae_class.__name__}_{str(uuid.uuid4())[:8]}_modified"
+        run_id = f"{config.run_name_prefix}{config.dataset.name}_{config.vae_class.__name__}_{str(config.latent_channels)}_{config.run_name_suffix}_{str(uuid.uuid4())[:8]}"
         run_folder = os.path.join(vae_runs_folder, run_id)
         os.makedirs(run_folder, exist_ok=True)
         print(f"Starting new run: {run_id}")
@@ -474,11 +542,12 @@ def train_vae(config):
         run_info['final_val_loss'] = val_loss if 'val_loss' in locals() else None
         update_run_info(run_folder, run_info)
         
-        # Update all_runs.json
+        # Update all_runs.json and all_finished_runs.json
         try:
             update_all_runs(vae_runs_folder, run_info)
+            update_all_finished_runs(vae_runs_folder, run_info)
         except Exception as e:
-            print(f"Error updating all_runs.json: {str(e)}")
+            print(f"Error updating run information: {str(e)}")
         
         writer.close()
         print(f"Training completed. Run information saved to {get_relative_path(os.path.join(run_folder, 'run_info.json'))}")
