@@ -1,18 +1,20 @@
 import random
 from dataclasses import dataclass, field, asdict
 from typing import Union, Type
-from vae import SimpleVAE, EnhancedVAE  # Import VAE classes
+from vae import SimpleVAE, EnhancedVAE, PowerfulVAE  # Import VAE classes
 
 @dataclass
 class DatasetConfig:
     name: str = "MRIToyDataset"
-    max_samples: Union[int, str] = 'max'
+    max_samples: Union[int, str] = "max"
 
     def to_dict(self):
         return asdict(self)
 
 @dataclass
 class VAEConfig:
+    run_name_prefix: str = ""
+    run_name_suffix: str = ""
     batch_size: int = 16
     num_epochs: int = 10000
     learning_rate: float = 1e-4
@@ -26,17 +28,17 @@ class VAEConfig:
     scheduler_T_mult: int = 2
     scheduler_eta_min: float = 1e-7
     loss_type: str = "mse"
-    kld_weight: float = 0.1
+    kld_weight: float = 0.01
     l2_weight: float = 1
-    visualization_steps: int = 50
-    checkpoint_steps: int = 50
+    visualization_steps: int = 1000
+    checkpoint_steps: int = 1000
     random_seed: int = 42
     resume_from: Union[str, None] = None
     normalize_loss: bool = True
-    early_stop: bool = True
-    early_stop_patience: int = 100
+    early_stop: bool = False
+    early_stop_patience: int = 1000
     early_stop_delta: float = 0.001
-    vae_class: Type[Union[SimpleVAE, EnhancedVAE]] = EnhancedVAE  # Use the actual class
+    vae_class: Type[Union[SimpleVAE, EnhancedVAE, PowerfulVAE]] = EnhancedVAE  # Use the actual class
 
     def to_dict(self):
         config_dict = asdict(self)
