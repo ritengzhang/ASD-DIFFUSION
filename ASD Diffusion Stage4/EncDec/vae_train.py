@@ -1,8 +1,7 @@
 import torch
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
-from torch.utils.data import DataLoader, random_split
-import ants
+from torch.utils.data import DataLoader, random_split, Subset
 import numpy as np
 import sys
 import os
@@ -10,72 +9,149 @@ import json
 import uuid
 from datetime import datetime
 import matplotlib.pyplot as plt
+import time
+from torch.utils.tensorboard import SummaryWriter
+from PIL import Image
+import ants
 
 # Add the parent directory and current directory to sys.path
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.extend([current_dir, parent_dir])
 
-from vae import SimpleVAE, vae_loss
+from vae import SimpleVAE, EnhancedVAE, vae_loss
 from datasets import get_dataset
 from vae_config import get_vae_config, print_vae_config
 
-def display_image(image_tensor, title, save_path):
-    # Convert PyTorch tensor to numpy array
-    image_np = image_tensor.cpu().numpy()
-    
-    # Remove batch and channel dimensions if they exist
-    if image_np.ndim == 5:  # (B, C, D, H, W)
-        image_np = image_np[0, 0]
-    elif image_np.ndim == 4:  # (C, D, H, W) or (B, D, H, W)
-        image_np = image_np[0]
-    elif image_np.ndim == 3:  # (D, H, W)
-        pass  # Already in correct format
-    else:
-        raise ValueError(f"Unexpected image shape: {image_np.shape}")
-    
-    print(f"{title} shape: {image_np.shape}")
-    
-    # Ensure the image is of shape (64, 64, 64)
-    if image_np.shape != (64, 64, 64):
-        raise ValueError(f"Expected image shape (64, 64, 64), but got {image_np.shape}")
-    
-    # Normalize to [0, 1] range
-    image_np = (image_np - np.min(image_np)) / (np.max(image_np) - np.min(image_np) + 1e-8)
-    
-    # Create ANTs image from numpy array
-    ants_image = ants.from_numpy(image_np)
-    
-    # Use the plot_ortho method from ANTs to save the figure
-    ants_image.plot_ortho(flat=True, title=title, filename=save_path, xyz_lines=False, orient_labels=False)
+
+def get_relative_path(path):
+    return os.path.relpath(path, current_dir)
 
 def normalize_data(x):
     return (x - x.min()) / (x.max() - x.min())
 
+def display_image(image_tensor, title, save_path):
+    image_np = image_tensor.cpu().numpy()
+    if image_np.ndim == 5:
+        image_np = image_np[0, 0]
+    elif image_np.ndim == 4:
+        image_np = image_np[0]
+    elif image_np.ndim == 3:
+        pass
+    else:
+        raise ValueError(f"Unexpected image shape: {image_np.shape}")
+    
+    print(f"{title} shape: {image_np.shape}")
+    if image_np.shape != (64, 64, 64):
+        raise ValueError(f"Expected image shape (64, 64, 64), but got {image_np.shape}")
+    
+    image_np = (image_np - np.min(image_np)) / (np.max(image_np) - np.min(image_np) + 1e-8)
+    ants_image = ants.from_numpy(image_np)
+    ants_image.plot_ortho(flat=True, title=title, filename=save_path, xyz_lines=False, orient_labels=False)
+
+def save_checkpoint(state, filename):
+    torch.save(state, filename)
+
+def load_checkpoint(filename):
+    return torch.load(filename)
+
+def update_run_info(run_folder, run_info):
+    with open(os.path.join(run_folder, 'run_info.json'), 'w') as f:
+        json.dump(run_info, f, indent=4)
+
+def update_all_runs(vae_runs_folder, run_info):
+    all_runs_file = os.path.join(vae_runs_folder, 'all_runs.json')
+    try:
+        if os.path.exists(all_runs_file) and os.path.getsize(all_runs_file) > 0:
+            with open(all_runs_file, 'r') as f:
+                all_runs = json.load(f)
+        else:
+            all_runs = []
+    except json.JSONDecodeError:
+        print(f"Error reading {all_runs_file}. Starting with empty list.")
+        all_runs = []
+    
+    for run in all_runs:
+        if run['run_id'] == run_info['run_id']:
+            run.update(run_info)
+            break
+    else:
+        all_runs.append(run_info)
+    
+    with open(all_runs_file, 'w') as f:
+        json.dump(all_runs, f, indent=4)
+
+def get_device_info():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device_info = {
+        "device": str(device),
+        "cuda_available": torch.cuda.is_available(),
+        "gpu_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
+    }
+    if torch.cuda.is_available():
+        device_info["cuda_version"] = torch.version.cuda
+        device_info["gpu_name"] = torch.cuda.get_device_name(0)
+    return device_info
+
+class EarlyStopping:
+    def __init__(self, patience=7, delta=0):
+        self.patience = patience
+        self.delta = delta
+        self.counter = 0
+        self.best_score = None
+        self.early_stop = False
+
+    def __call__(self, val_loss):
+        score = -val_loss
+        if self.best_score is None:
+            self.best_score = score
+        elif score < self.best_score + self.delta:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_score = score
+            self.counter = 0
+
 def train_vae(config):
-    # Create the vae_runs folder in the current directory
+    torch.manual_seed(config.random_seed)
+    np.random.seed(config.random_seed)
+    
     vae_runs_folder = os.path.join(current_dir, 'vae_runs')
     os.makedirs(vae_runs_folder, exist_ok=True)
     
-    # Create subfolders for models, results, and learning curves
-    models_folder = os.path.join(vae_runs_folder, 'models')
-    results_folder = os.path.join(vae_runs_folder, 'results_visualized')
-    learning_curves_folder = os.path.join(vae_runs_folder, 'learning_curves')
+    log_dir = os.path.join(current_dir, 'tensorboard_logs')
+    os.makedirs(log_dir, exist_ok=True)
+    
+    if config.resume_from:
+        run_id = config.resume_from
+        run_folder = os.path.join(vae_runs_folder, run_id)
+        if not os.path.exists(run_folder):
+            raise ValueError(f"No run found with ID: {run_id}")
+        print(f"Resuming run: {run_id}")
+    else:
+        run_id = f"{config.dataset.name}_{config.vae_class.__name__}_{str(uuid.uuid4())[:8]}_modified"
+        run_folder = os.path.join(vae_runs_folder, run_id)
+        os.makedirs(run_folder, exist_ok=True)
+        print(f"Starting new run: {run_id}")
+    
+    models_folder = os.path.join(run_folder, 'checkpoints')
+    results_folder = os.path.join(run_folder, 'results_visualized')
     os.makedirs(models_folder, exist_ok=True)
     os.makedirs(results_folder, exist_ok=True)
-    os.makedirs(learning_curves_folder, exist_ok=True)
     
-    # Create a unique ID for this training run
-    run_id = str(uuid.uuid4())[:8]
-    
-    # Create a folder for this run's results
-    run_results_folder = os.path.join(results_folder, f'run_{run_id}')
-    os.makedirs(run_results_folder, exist_ok=True)
+    writer = SummaryWriter(log_dir=os.path.join(log_dir, run_id))
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    # Get the dataset
     dataset = get_dataset(config.dataset)
+    
+    if config.dataset.max_samples == "max":
+        max_samples = len(dataset)
+    else:
+        max_samples = min(int(config.dataset.max_samples), len(dataset))
+    
+    if max_samples < len(dataset):
+        dataset = Subset(dataset, range(max_samples))
     
     if config.train_only:
         train_dataset = dataset
@@ -89,7 +165,7 @@ def train_vae(config):
     if val_dataset:
         val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
     
-    vae = SimpleVAE(
+    vae = config.vae_class(
         in_channels=1, 
         out_channels=1, 
         latent_channels=config.latent_channels
@@ -98,124 +174,314 @@ def train_vae(config):
     optimizer = optim.Adam(vae.parameters(), lr=config.learning_rate)
     scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=config.scheduler_T0, T_mult=config.scheduler_T_mult, eta_min=config.scheduler_eta_min)
     
+    start_epoch = 0
+    best_loss = float('inf')
     train_losses = []
     val_losses = []
     
-    for epoch in range(config.num_epochs):
-        vae.train()
-        train_loss = 0
-        for batch in train_loader:
-            if isinstance(batch, list):
-                x = batch[0].to(device)
-            else:
-                x = batch.to(device)
-            
-            x = normalize_data(x)  # Normalize input data
-            
-            optimizer.zero_grad()
-            recon_batch, mu, logvar = vae(x)
-            loss = vae_loss(recon_batch, x, mu, logvar)
-            loss.backward()
-            train_loss += loss.item()
-            optimizer.step()
+    if config.resume_from:
+        latest_checkpoint = max(
+            [f for f in os.listdir(models_folder) if f.startswith('checkpoint_epoch_')],
+            key=lambda x: int(x.split('_')[-1].split('.')[0])
+        )
+        checkpoint = load_checkpoint(os.path.join(models_folder, latest_checkpoint))
+        vae.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        start_epoch = checkpoint['epoch']
+        best_loss = checkpoint['best_loss']
+        train_losses = checkpoint['train_losses']
+        val_losses = checkpoint['val_losses']
+        print(f"Resuming training from epoch {start_epoch}")
         
-        scheduler.step()
-        
-        train_loss /= len(train_loader.dataset)
-        train_losses.append(train_loss)
-        
-        if val_dataset:
-            vae.eval()
-            val_loss = 0
-            with torch.no_grad():
-                for batch in val_loader:
-                    if isinstance(batch, list):
-                        x = batch[0].to(device)
-                    else:
-                        x = batch.to(device)
-                    x = normalize_data(x)  # Normalize input data
-                    recon_batch, mu, logvar = vae(x)
-                    val_loss += vae_loss(recon_batch, x, mu, logvar).item()
-            val_loss /= len(val_loader.dataset)
-            val_losses.append(val_loss)
-            print(f'Epoch {epoch+1}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, LR: {scheduler.get_last_lr()[0]:.6f}')
-        else:
-            print(f'Epoch {epoch+1}, Train Loss: {train_loss:.4f}, LR: {scheduler.get_last_lr()[0]:.6f}')
-        
-        if (epoch + 1) % 1000 == 0 and config.visualize:
-            with torch.no_grad():
-                sample = next(iter(train_loader))
-                if isinstance(sample, list):
-                    sample = sample[0]
-                sample = sample.to(device)
-                sample = normalize_data(sample)
-                recon, _, _ = vae(sample)
-                
-                # Display original and reconstructed images
-                display_image(sample, f"Original - Epoch {epoch+1}", 
-                              os.path.join(run_results_folder, f'original_epoch_{epoch+1}.png'))
-                display_image(recon, f"Reconstructed - Epoch {epoch+1}", 
-                              os.path.join(run_results_folder, f'reconstructed_epoch_{epoch+1}.png'))
+        with open(os.path.join(run_folder, 'run_info.json'), 'r') as f:
+            run_info = json.load(f)
+    else:
+        run_info = {
+            'run_id': run_id,
+            'config': config.to_dict(),
+            'start_time': datetime.now().isoformat(),
+            'best_loss': best_loss,
+            'best_epoch': start_epoch,
+            'latest_epoch': start_epoch,
+            'checkpoints': [],
+            'device_info': get_device_info()
+        }
     
-    # Save the model using an absolute path
-    model_path = os.path.join(models_folder, f'vae_model_{run_id}.pth')
-    os.makedirs(os.path.dirname(model_path), exist_ok=True)
-    torch.save(vae.state_dict(), model_path)
-    print(f"VAE model saved to {model_path}")
-
-    # Save learning curves
-    learning_curve_path = None
-    if not config.train_only:
-        plt.figure(figsize=(10, 5))
-        plt.plot(train_losses, label='Train Loss')
-        plt.plot(val_losses, label='Val Loss')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.title('VAE Learning Curves')
-        plt.legend()
-        learning_curve_path = os.path.join(learning_curves_folder, f'learning_curve_{run_id}.png')
-        os.makedirs(os.path.dirname(learning_curve_path), exist_ok=True)
-        plt.savefig(learning_curve_path)
-        plt.close()
-        print(f"Learning curves saved to {learning_curve_path}")
-
-    # Prepare metadata
-    metadata = {
-        'run_id': run_id,
-        'timestamp': datetime.now().isoformat(),
-        'config': {
-            'batch_size': config.batch_size,
-            'num_epochs': config.num_epochs,
-            'learning_rate': config.learning_rate,
-            'train_split': config.train_split,
-            'visualize': config.visualize,
-            'train_only': config.train_only,
-            'latent_channels': config.latent_channels,
-            'dataset': {
-                'name': config.dataset.name
-            }
-        },
-        'final_train_loss': train_losses[-1],
-        'final_val_loss': val_losses[-1] if val_losses else None,
-        'model_path': model_path,
-        'learning_curve_path': learning_curve_path
-    }
+    if config.early_stop:
+        early_stopping = EarlyStopping(patience=config.early_stop_patience, delta=config.early_stop_delta)
     
-    # Load existing metadata or create new file
-    metadata_path = os.path.join(vae_runs_folder, 'vae_runs_metadata.json')
+    start_time = time.time()
+    val_loss = None
+    
     try:
-        with open(metadata_path, 'r') as f:
-            all_metadata = json.load(f)
-        if not isinstance(all_metadata, list):
-            all_metadata = [all_metadata]
-    except (FileNotFoundError, json.JSONDecodeError):
-        all_metadata = []
+        for epoch in range(start_epoch, config.num_epochs):
+            epoch_start_time = time.time()
+            vae.train()
+            train_loss = 0
+            train_recon_loss = 0
+            train_kld_loss = 0
+            train_l2_loss = 0
+
+            for batch_idx, batch in enumerate(train_loader):
+                if isinstance(batch, list):
+                    x = batch[0].to(device)
+                else:
+                    x = batch.to(device)
+
+                x = normalize_data(x)
+
+                optimizer.zero_grad()
+                recon_batch, mu, logvar = vae(x)
+                loss, recon_loss, kld_loss, weighted_kld_loss, l2_recon_loss = vae_loss(
+                    recon_batch, x, mu, logvar, loss_type=config.loss_type, kld_weight=config.kld_weight
+                )
+
+                loss.backward()
+                optimizer.step()
+
+                # Accumulate losses
+                train_loss += loss.item()
+                train_recon_loss += recon_loss.item()
+                train_kld_loss += kld_loss.item()
+                train_l2_loss += l2_recon_loss.item()
+
+            scheduler.step()
+
+            # Normalize losses
+            if config.normalize_loss:
+                train_loss /= len(train_loader.dataset)
+                train_recon_loss /= len(train_loader.dataset)
+                train_kld_loss /= len(train_loader.dataset)
+                train_l2_loss /= len(train_loader.dataset)
+            else:
+                train_loss /= len(train_loader)
+                train_recon_loss /= len(train_loader)
+                train_kld_loss /= len(train_loader)
+                train_l2_loss /= len(train_loader)
+
+            train_losses.append(train_loss)
+
+            # Log losses to TensorBoard
+            writer.add_scalar('Loss/train_total', train_loss, epoch)
+            writer.add_scalar('Loss/train_recon', train_recon_loss, epoch)
+            writer.add_scalar('Loss/train_kld', train_kld_loss, epoch)
+            writer.add_scalar('Loss/train_l2', train_l2_loss, epoch)
+            
+            if val_dataset:
+                vae.eval()
+                val_loss = 0
+                val_recon_loss = 0
+                val_kld_loss = 0
+                val_l2_loss = 0
+
+                with torch.no_grad():
+                    for batch in val_loader:
+                        if isinstance(batch, list):
+                            x = batch[0].to(device)
+                        else:
+                            x = batch.to(device)
+                        x = normalize_data(x)
+                        recon_batch, mu, logvar = vae(x)
+                        loss, recon_loss, kld_loss, weighted_kld_loss, l2_recon_loss = vae_loss(
+                            recon_batch, x, mu, logvar, loss_type=config.loss_type, kld_weight=config.kld_weight
+                        )
+
+                        val_loss += loss.item()
+                        val_recon_loss += recon_loss.item()
+                        val_kld_loss += kld_loss.item()
+                        val_l2_loss += l2_recon_loss.item()
+
+                if config.normalize_loss:
+                    val_loss /= len(val_loader.dataset)
+                    val_recon_loss /= len(val_loader.dataset)
+                    val_kld_loss /= len(val_loader.dataset)
+                    val_l2_loss /= len(val_loader.dataset)
+                else:
+                    val_loss /= len(val_loader)
+                    val_recon_loss /= len(val_loader)
+                    val_kld_loss /= len(val_loader)
+                    val_l2_loss /= len(val_loader)
+
+                val_losses.append(val_loss)
+
+                # Log normalized and unweighted losses to TensorBoard for validation
+                writer.add_scalar('Loss/val_total', val_loss, epoch)
+                writer.add_scalar('Loss/val_recon', val_recon_loss, epoch)
+                writer.add_scalar('Loss/val_kld', val_kld_loss, epoch)
+                writer.add_scalar('Loss/val_l2', val_l2_loss, epoch)
+
+                # Print normalized, unweighted losses
+                print(f'Epoch {epoch+1}, Train Loss: {train_loss:.4f} '
+                      f'(Recon: {train_recon_loss:.4f}, '
+                      f'KLD: {train_kld_loss:.4f}, '
+                      f'L2: {train_l2_loss:.4f}), '
+                      f'Val Loss: {val_loss:.4f} '
+                      f'(Recon: {val_recon_loss:.4f}, '
+                      f'KLD: {val_kld_loss:.4f}, '
+                      f'L2: {val_l2_loss:.4f}), '
+                      f'LR: {scheduler.get_last_lr()[0]:.6f}')
+                
+                if val_loss < best_loss:
+                    best_loss = val_loss
+                    run_info['best_loss'] = best_loss
+                    run_info['best_epoch'] = epoch + 1
+
+                if config.early_stop:
+                    early_stopping(val_loss)
+                    if early_stopping.early_stop:
+                        print("Early stopping")
+                        break
+            else:
+                # Print normalized, unweighted losses (for training only, no validation)
+                print(f'Epoch {epoch+1}, Train Loss: {train_loss:.4f} '
+                      f'(Recon: {train_recon_loss:.4f}, '
+                      f'KLD: {train_kld_loss:.4f}, '
+                      f'L2: {train_l2_loss:.4f}), '
+                      f'LR: {scheduler.get_last_lr()[0]:.6f}')
+                
+                if train_loss < best_loss:
+                    best_loss = train_loss
+                    run_info['best_loss'] = best_loss
+                    run_info['best_epoch'] = epoch + 1
+
+            run_info['latest_epoch'] = epoch + 1
+            
+            # Visualization and saving results at intervals
+            if (epoch + 1) % config.visualization_steps == 0 and config.visualize:
+                vae.eval()
+                with torch.no_grad():
+                    # Visualize from training set
+                    train_sample = next(iter(train_loader))
+                    if isinstance(train_sample, list):
+                        train_sample = train_sample[0]
+                    train_sample = train_sample.to(device)
+                    train_sample = normalize_data(train_sample)
+                    train_recon, _, _ = vae(train_sample)
+
+                    # Display original and reconstructed images from training set
+                    train_original_path = os.path.join(results_folder, f'train_original_epoch_{epoch+1}.png')
+                    train_recon_path = os.path.join(results_folder, f'train_reconstructed_epoch_{epoch+1}.png')
+                    display_image(train_sample, f"Train Original - Epoch {epoch+1}", train_original_path)
+                    display_image(train_recon, f"Train Reconstructed - Epoch {epoch+1}", train_recon_path)
+
+                    # Log training images to TensorBoard
+                    train_original_img = Image.open(train_original_path)
+                    train_recon_img = Image.open(train_recon_path)
+                    writer.add_image('Train/Original', np.array(train_original_img), epoch, dataformats='HWC')
+                    writer.add_image('Train/Reconstructed', np.array(train_recon_img), epoch, dataformats='HWC')
+
+                    # Visualize from validation set if available
+                    if val_dataset:
+                        val_sample = next(iter(val_loader))
+                        if isinstance(val_sample, list):
+                            val_sample = val_sample[0]
+                        val_sample = val_sample.to(device)
+                        val_sample = normalize_data(val_sample)
+                        val_recon, _, _ = vae(val_sample)
+
+                        # Display original and reconstructed images from validation set
+                        val_original_path = os.path.join(results_folder, f'val_original_epoch_{epoch+1}.png')
+                        val_recon_path = os.path.join(results_folder, f'val_reconstructed_epoch_{epoch+1}.png')
+                        display_image(val_sample, f"Val Original - Epoch {epoch+1}", val_original_path)
+                        display_image(val_recon, f"Val Reconstructed - Epoch {epoch+1}", val_recon_path)
+
+                        # Log validation images to TensorBoard
+                        val_original_img = Image.open(val_original_path)
+                        val_recon_img = Image.open(val_recon_path)
+                        writer.add_image('Val/Original', np.array(val_original_img), epoch, dataformats='HWC')
+                        writer.add_image('Val/Reconstructed', np.array(val_recon_img), epoch, dataformats='HWC')
+
+
+            # Save checkpoint based on checkpoint_steps
+            if (epoch + 1) % config.checkpoint_steps == 0:
+                checkpoint = {
+                    'epoch': epoch + 1,
+                    'model_state_dict': vae.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'best_loss': best_loss,
+                    'train_losses': train_losses,
+                    'val_losses': val_losses,
+                    'train_loss': train_loss,
+                    'train_recon_loss': train_recon_loss,
+                    'train_kld_loss': train_kld_loss,
+                    'train_l2_loss': train_l2_loss,
+                    'val_loss': val_loss if val_dataset else None,
+                    'val_recon_loss': val_recon_loss if val_dataset else None,
+                    'val_kld_loss': val_kld_loss if val_dataset else None,
+                    'val_l2_loss': val_l2_loss if val_dataset else None,
+                    'learning_rate': scheduler.get_last_lr()[0]
+                }
+                
+                checkpoint_filename = os.path.join(models_folder, f'checkpoint_epoch_{epoch+1}.pth')
+                save_checkpoint(checkpoint, checkpoint_filename)
+                
+                run_info['checkpoints'].append({
+                    'epoch': epoch + 1,
+                    'filename': get_relative_path(checkpoint_filename),
+                    'train_loss': train_loss,
+                    'train_recon_loss': train_recon_loss,
+                    'train_kld_loss': train_kld_loss,
+                    'train_l2_loss': train_l2_loss,
+                    'val_loss': val_loss if val_dataset else None,
+                    'val_recon_loss': val_recon_loss if val_dataset else None,
+                    'val_kld_loss': val_kld_loss if val_dataset else None,
+                    'val_l2_loss': val_l2_loss if val_dataset else None,
+                    'learning_rate': scheduler.get_last_lr()[0]
+                })
+            
+            update_run_info(run_folder, run_info)
+            
+            epoch_end_time = time.time()
+            epoch_duration = epoch_end_time - epoch_start_time
+            run_info['time_per_epoch'] = epoch_duration
     
-    # Append new metadata and save
-    all_metadata.append(metadata)
-    with open(metadata_path, 'w') as f:
-        json.dump(all_metadata, f, indent=4)
-    print(f"Metadata appended to {metadata_path}")
+    except Exception as e:
+        error_info = {
+            'error_message': str(e),
+            'epoch': epoch + 1 if 'epoch' in locals() else start_epoch,
+            'batch_idx': batch_idx if 'batch_idx' in locals() else None,
+            'sample_idx': batch_idx * config.batch_size if 'batch_idx' in locals() else None
+        }
+        run_info['error'] = error_info
+        print(f"Error occurred: {str(e)}")
+    
+    finally:
+        end_time = time.time()
+        run_info['total_time'] = end_time - start_time
+        
+        # Save learning curves
+        try:
+            plt.figure(figsize=(10, 5))
+            plt.plot(train_losses, label='Train Loss')
+            if val_losses:
+                plt.plot(val_losses, label='Val Loss')
+            plt.xlabel('Epoch')
+            plt.ylabel('Loss')
+            plt.title('VAE Learning Curves')
+            plt.legend()
+            learning_curve_path = os.path.join(run_folder, 'learning_curve.png')
+            plt.savefig(learning_curve_path)
+            plt.close()
+            print(f"Learning curves saved to {get_relative_path(learning_curve_path)}")
+        except Exception as e:
+            print(f"Error saving learning curves: {str(e)}")
+        
+        # Update and save final run info
+        run_info['end_time'] = datetime.now().isoformat()
+        run_info['final_train_loss'] = train_loss if 'train_loss' in locals() else None
+        run_info['final_val_loss'] = val_loss if 'val_loss' in locals() else None
+        update_run_info(run_folder, run_info)
+        
+        # Update all_runs.json
+        try:
+            update_all_runs(vae_runs_folder, run_info)
+        except Exception as e:
+            print(f"Error updating all_runs.json: {str(e)}")
+        
+        writer.close()
+        print(f"Training completed. Run information saved to {get_relative_path(os.path.join(run_folder, 'run_info.json'))}")
 
 if __name__ == "__main__":
     config = get_vae_config()
