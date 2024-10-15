@@ -43,8 +43,8 @@ class StableDiffusionModel(nn.Module):
         return c1.view(-1, 1, 1, 1, 1) * (x - c2.view(-1, 1, 1, 1, 1) * noise_pred) + torch.sqrt(beta).view(-1, 1, 1, 1, 1) * torch.randn_like(x)
 
     def forward(self, x, text, t):
-        with torch.no_grad():
-            latent, _, _ = self.vae.encode(x)
+        # Encode the input to latent space
+        latent, _, _ = self.vae.encode(x)
         
         # Prepare text embedding
         if self.use_text_conditioning and text is not None:
@@ -56,16 +56,21 @@ class StableDiffusionModel(nn.Module):
         noise = torch.randn_like(latent)
         noisy_latent = self.q_sample(latent, t, noise)
         
-        # Predict noise
+        # Predict noise using UNet
         pred_noise = self.unet(noisy_latent, t, text_embedding)
         
         return pred_noise, noise
 
     def sample(self, batch_size, text=None):
-        latent_channels = self.unet.in_channels
-        latent_size = self.unet.image_size // 4  # Assuming the VAE downsamples by a factor of 4
-        shape = (batch_size, latent_channels, latent_size, latent_size, latent_size)
         device = next(self.parameters()).device
+        
+        # Get latent size from VAE
+        with torch.no_grad():
+            dummy_input = torch.randn(1, 1, 64, 64, 64).to(device)
+            latent, _, _ = self.vae.encode(dummy_input)
+            latent_channels, latent_size = latent.shape[1], latent.shape[2]
+        
+        shape = (batch_size, latent_channels, latent_size, latent_size, latent_size)
         
         # Prepare text embedding
         if self.use_text_conditioning and text is not None:
