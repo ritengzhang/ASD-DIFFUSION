@@ -1,21 +1,27 @@
 import os
-from dataclasses import dataclass, field
-from typing import List, Optional
+import uuid
+from dataclasses import dataclass, field, asdict
+from typing import Union, List, Optional
 
 @dataclass
 class DatasetConfig:
     name: str = "MRIToyDataset"
-    num_samples: int = 1000
+    max_samples: Union[int, str] = "max"
     image_size: int = 64
     text_length: int = 10
 
+    def to_dict(self):
+        return asdict(self)
+
 @dataclass
 class ModelConfig:
-    vae_type: str = "SimpleVAE"
+    run_name_prefix: str = ""
+    run_name_suffix: str = ""
+    vae_type: str = "EnhancedVAE"
     unet_type: str = "UNet"
     text_encoder_type: str = "SimpleTextEncoder"
     cross_attention_type: str = "CrossAttention"
-    latent_channels: int = 16
+    latent_channels: int = 256
     image_size: int = 64
     use_text_conditioning: bool = False
     num_diffusion_steps: int = 1000
@@ -25,8 +31,7 @@ class ModelConfig:
     train_modules: List[bool] = field(default_factory=lambda: [True, True, True, True])
     vae_in_channels: int = 1
     vae_out_channels: int = 1
-    attention_note: str = ""
-    other_note: str = ""
+    attention_note: str = "NoAttention"
 
     def __post_init__(self):
         if self.vae_run_id:
@@ -37,7 +42,7 @@ class ModelConfig:
     @staticmethod
     def find_latest_vae_checkpoint(run_id):
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        vae_runs_folder = os.path.join(current_dir, '..', 'EncDec', 'vae_runs')
+        vae_runs_folder = os.path.join(current_dir, 'EncDec', 'vae_runs')
         run_folder = os.path.join(vae_runs_folder, run_id)
         checkpoints_folder = os.path.join(run_folder, 'checkpoints')
         
@@ -54,20 +59,24 @@ class ModelConfig:
 
 @dataclass
 class TrainerConfig:
-    batch_size: int = 32
-    num_epochs: int = 100
+    batch_size: int = 16
+    num_epochs: int = 1000
     learning_rate: float = 1e-4
     train_split: float = 0.8
     visualize: bool = True
     train_only: bool = True
     optimizer: str = "Adam"
     scheduler: str = "ReduceLROnPlateau"
-    use_reconstruction_loss: bool = False
+    use_reconstruction_loss: bool = True
     reconstruction_loss_weight: float = 1.0
     kl_loss_weight: float = 1.0
-    visualization_steps: int = 10
-    checkpoint_steps: int = 10
+    visualization_steps: int = 100
+    checkpoint_steps: int = 100
     resume_from: Optional[str] = None
+    early_stop: bool = False
+    early_stop_patience: int = 100
+    early_stop_delta: float = 0.001
+
 
 @dataclass
 class Config:
@@ -75,12 +84,23 @@ class Config:
     model: ModelConfig
     trainer: TrainerConfig
 
-    def get_run_name(self):
-        attention_note = f"_{self.model.attention_note}" if self.model.attention_note else ""
-        other_note = f"_{self.model.other_note}" if self.model.other_note else ""
-        return f"{self.dataset.name}_{self.model.vae_type}{attention_note}{other_note}"
+    def get_run_id(self):
+        components = []
+        if self.model.run_name_prefix:
+            components.append(self.model.run_name_prefix)
+        components.extend([
+            self.dataset.name,
+            self.model.vae_type,
+            f"{self.model.latent_channels}ch",
+            self.model.attention_note
+        ])
+        if self.model.run_name_suffix:
+            components.append(self.model.run_name_suffix)
+        base_name = "_".join(components)
+        unique_id = str(uuid.uuid4())[:8]
+        return f"{base_name}_{unique_id}"
 
-def get_config(vae_run_id: Optional[str] = None):
+def get_config(vae_run_id: Optional[str] = "MRIToyDataset_EnhancedVAE_0a89a8df_modified"):
     return Config(
         dataset=DatasetConfig(),
         model=ModelConfig(vae_run_id=vae_run_id),
@@ -89,8 +109,9 @@ def get_config(vae_run_id: Optional[str] = None):
 
 def print_config(config):
     print("Configuration:")
+    print(f"Run ID: {config.get_run_id()}")
     print(f"Dataset: {config.dataset.name}")
-    print(f"Number of samples: {config.dataset.num_samples}")
+    print(f"Max samples: {config.dataset.max_samples}")
     print(f"Image size: {config.dataset.image_size}")
     print(f"Text length: {config.dataset.text_length}")
     print(f"VAE type: {config.model.vae_type}")
@@ -106,8 +127,9 @@ def print_config(config):
     print(f"VAE run ID: {config.model.vae_run_id}")
     print(f"VAE path: {config.model.vae_path}")
     print(f"Train modules: {config.model.train_modules}")
+    print(f"Run name prefix: {config.model.run_name_prefix}")
+    print(f"Run name suffix: {config.model.run_name_suffix}")
     print(f"Attention note: {config.model.attention_note}")
-    print(f"Other note: {config.model.other_note}")
     print(f"Batch size: {config.trainer.batch_size}")
     print(f"Number of epochs: {config.trainer.num_epochs}")
     print(f"Learning rate: {config.trainer.learning_rate}")
