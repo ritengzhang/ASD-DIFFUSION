@@ -13,14 +13,37 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
 import traceback
 
+class EarlyStopping:
+    def __init__(self, patience=7, delta=0):
+        self.patience = patience
+        self.delta = delta
+        self.counter = 0
+        self.best_score = None
+        self.early_stop = False
+
+    def __call__(self, val_loss):
+        score = -val_loss
+        if self.best_score is None:
+            self.best_score = score
+        elif score < self.best_score + self.delta:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_score = score
+            self.counter = 0
+
 class Trainer:
     def __init__(self, config, models, dataset, device):
         self.config = config
         self.models = models
         self.device = device
-        self.dataset = dataset
         
-        self.run_id = self.generate_run_id()
+        if isinstance(config.dataset.max_samples, int):
+            self.dataset = torch.utils.data.Subset(dataset, range(min(config.dataset.max_samples, len(dataset))))
+        else:
+            self.dataset = dataset
+        self.run_id = self.config.get_run_id()
         
         current_dir = os.path.dirname(os.path.abspath(__file__))
         self.diffusion_runs_folder = os.path.join(current_dir, 'diffusion_runs')
@@ -84,15 +107,14 @@ class Trainer:
             "latest_checkpoint": None
         }
 
-    def generate_run_id(self):
-        base_name = f"{self.config.dataset.name}_{self.config.model.vae_type}"
-        if self.config.model.attention_note:
-            base_name += f"_{self.config.model.attention_note}"
-        if self.config.model.other_note:
-            base_name += f"_{self.config.model.other_note}"
-        unique_id = str(uuid.uuid4())[:8]
-        return f"{base_name}_{unique_id}"
-
+        if self.config.trainer.early_stop:
+            self.early_stopping = EarlyStopping(
+                patience=self.config.trainer.early_stop_patience,
+                delta=self.config.trainer.early_stop_delta
+            )
+        else:
+            self.early_stopping = None
+    
     def train_step(self, x, text, t):
         self.optimizer.zero_grad()
         noise_pred, target_noise = self.models(x, text, t)
@@ -274,11 +296,11 @@ class Trainer:
             else:
                 train_image = train_batch.to(self.device)
                 train_text = None
-            self.display_image(train_image[0], "Original Train Image", epoch + 1)
+            self.display_image(train_image[0], "Original Train Image", epoch)
             
             train_latent, _, _ = self.models.vae.encode(train_image)
             train_reconstructed = self.models.vae.decode(train_latent)
-            self.display_image(train_reconstructed[0], "Reconstructed Train Image", epoch + 1)
+            self.display_image(train_reconstructed[0], "Reconstructed Train Image", epoch)
 
             if not self.config.trainer.train_only:
                 # Visualize validation sample
@@ -290,11 +312,11 @@ class Trainer:
                     val_image = val_batch.to(self.device)
                     val_text = None
 
-                self.display_image(val_image[0], "Original Val Image", epoch + 1, is_validation=True)
+                self.display_image(val_image[0], "Original Val Image", epoch, is_validation=True)
                 
                 val_latent, _, _ = self.models.vae.encode(val_image)
                 val_reconstructed = self.models.vae.decode(val_latent)
-                self.display_image(val_reconstructed[0], "Reconstructed Val Image", epoch + 1, is_validation=True)
+                self.display_image(val_reconstructed[0], "Reconstructed Val Image", epoch, is_validation=True)
 
     def display_image(self, image_tensor, title, epoch, is_validation=False):
         image_np = image_tensor.detach().cpu().numpy()
@@ -382,6 +404,13 @@ class Trainer:
                     
                     if self.scheduler:
                         self.scheduler.step(val_loss)
+                    
+                    # Early stopping check
+                    if self.early_stopping:
+                        self.early_stopping(val_loss)
+                        if self.early_stopping.early_stop:
+                            print("Early stopping triggered")
+                            break
                 else:
                     print(f"Epoch {epoch+1}/{self.config.trainer.num_epochs}")
                     print(f"Train Loss: {train_loss:.4f} (Noise: {train_loss_breakdown['noise_loss']:.4f}, "
@@ -391,10 +420,10 @@ class Trainer:
                     if self.scheduler:
                         self.scheduler.step(train_loss)
                 
-                if (epoch + 1) % self.config.trainer.visualization_steps == 0 and self.config.trainer.visualize:
+                if epoch % self.config.trainer.visualization_steps == 0 and self.config.trainer.visualize:
                     self.visualize(epoch)
 
-                if (epoch + 1) % self.config.trainer.checkpoint_steps == 0:
+                if epoch  % self.config.trainer.checkpoint_steps == 0:
                     self.save_checkpoint(epoch, metrics)
                     self.update_json_files()
 
