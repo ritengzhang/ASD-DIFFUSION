@@ -1,6 +1,6 @@
 import torch
 from config import get_config, print_config
-from datasets import get_dataset
+from my_datasets import get_dataset
 from models import get_models
 from trainer import Trainer
 
