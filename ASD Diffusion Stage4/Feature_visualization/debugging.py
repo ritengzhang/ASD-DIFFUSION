@@ -293,7 +293,7 @@ print(train_data.shape)
 from EncDec.encdiff import EncDiff, create_encdiff_model
 import json 
 
-config_path = "../Visualization/paths/encdiff/config.json"
+config_path = "../Visualization/paths/Braindataset/encdiff/config.json"
 with open(config_path, 'r') as f:
         config = json.load(f)
 model, _ = create_encdiff_model(
@@ -302,6 +302,7 @@ model, _ = create_encdiff_model(
         out_channels=config['out_channels'],
         device=device
     )
+
 # print(train_data.shape)
 # for item in dataset:
 #     print(item[0].shape)  # This should print (1, 64, 64, 64) if the channel dimension is present
@@ -340,47 +341,48 @@ model, _ = create_encdiff_model(
 # fig.show()
 
 # Load checkpoint if provided
-# checkpoint_path = "../Visualization/paths/encdiff_best_model.pth"
-# checkpoint = torch.load(checkpoint_path, map_location=device)
+checkpoint_path = "../Visualization/paths/Braindataset/encdiff/encdiff_best_model.pth"
+checkpoint = torch.load(checkpoint_path, map_location=device)
 
-# model.load_state_dict(checkpoint)
-# model = model.to(device)
-# model.eval()
+model.load_state_dict(checkpoint)
+model = model.to(device)
+model.eval()
 
-# with torch.no_grad():
-#     features = model.encode_image(train_data.to(device))
+print("done")
+with torch.no_grad():
+    features = model.encode_image(train_data.to(device))
 
-# print(features.shape)
+print(features.shape)
 
-import psutil
-import os
+# import psutil
+# import os
 
-def print_memory_usage():
-    """Print current memory usage on Mac"""
-    process = psutil.Process(os.getpid())
-    memory_info = process.memory_info()
+# def print_memory_usage():
+#     """Print current memory usage on Mac"""
+#     process = psutil.Process(os.getpid())
+#     memory_info = process.memory_info()
     
-    print("\nMemory Usage:")
-    print(f"RSS (Resident Set Size): {memory_info.rss / 1024**2:.1f} MB")
-    print(f"VMS (Virtual Memory Size): {memory_info.vms / 1024**2:.1f} MB")
-    print(f"System Memory Usage: {psutil.virtual_memory().percent}%")
-    print(f"Available System Memory: {psutil.virtual_memory().available / 1024**2:.1f} MB")
+#     print("\nMemory Usage:")
+#     print(f"RSS (Resident Set Size): {memory_info.rss / 1024**2:.1f} MB")
+#     print(f"VMS (Virtual Memory Size): {memory_info.vms / 1024**2:.1f} MB")
+#     print(f"System Memory Usage: {psutil.virtual_memory().percent}%")
+#     print(f"Available System Memory: {psutil.virtual_memory().available / 1024**2:.1f} MB")
 
-def estimate_batch_memory(dataset, batch_size):
-    """Estimate memory requirements for processing"""
-    sample_data = dataset[0][0]
-    sample_size = sample_data.numel() * sample_data.element_size()  # bytes
-    batch_memory = sample_size * batch_size / 1024**2  # MB
+# def estimate_batch_memory(dataset, batch_size):
+#     """Estimate memory requirements for processing"""
+#     sample_data = dataset[0][0]
+#     sample_size = sample_data.numel() * sample_data.element_size()  # bytes
+#     batch_memory = sample_size * batch_size / 1024**2  # MB
     
-    print("\nMemory Estimates:")
-    print(f"Single sample size: {sample_size / 1024**2:.1f} MB")
-    print(f"Batch size: {batch_size}")
-    print(f"Estimated batch memory: {batch_memory:.1f} MB")
+#     print("\nMemory Estimates:")
+#     print(f"Single sample size: {sample_size / 1024**2:.1f} MB")
+#     print(f"Batch size: {batch_size}")
+#     print(f"Estimated batch memory: {batch_memory:.1f} MB")
     
-    return batch_memory
+#     return batch_memory
 
-# At start of script
-print_memory_usage()
+# # At start of script
+# print_memory_usage()
 
-# Before loading dataset
-estimate_batch_memory(dataset, batch_size=32)
+# # Before loading dataset
+# estimate_batch_memory(dataset, batch_size=32)

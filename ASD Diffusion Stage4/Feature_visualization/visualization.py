@@ -10,6 +10,7 @@ import warnings
 import gc
 import sys
 import os
+import json 
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -25,11 +26,13 @@ torch.manual_seed(42)
 np.random.seed(42)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(device)
 # dataset = MRIToyDataset()
 dataset = load_abcd_dataset()
 train_size = int(0.8 * len(dataset))
 val_size = len(dataset) - train_size
 train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+print(len(train_dataset), len(val_dataset))
 # print(train_dataset)
 # convert to torch tensor
 # dataset = torch.from_numpy(dataset.data).float().to(device)
@@ -67,17 +70,32 @@ else:
         val_subject_ids.append(clean_id)
 
     df = pd.read_csv('../ToyDataProcessedDataset/processed_abcd_ksad01.csv', low_memory=False)
-    possible_col = ["sex", "interview_age", "label", "ksads_14_402_p", "ksads_14_405_p", "ksads_14_396_p", "ksads_14_400_p", "ksads_14_398_p", "ksads_14_397_p", "ksads_14_404_p", "ksads_14_406_p", "ksads_14_401_p", "ksads_14_403_p", "ksads_10_869_p", "ksads_1_840_p", "ksads_15_901_p"]  
+    possible_col = ["subjectkey","sex", "interview_age", "label", "ksads_14_402_p", "ksads_14_405_p", "ksads_14_396_p", "ksads_14_400_p", "ksads_14_398_p", "ksads_14_397_p", "ksads_14_404_p", "ksads_14_406_p", "ksads_14_401_p", "ksads_14_403_p", "ksads_10_869_p", "ksads_1_840_p", "ksads_15_901_p"]  
 
     # Match with CSV using subject IDs
-    train_df = df[df['subjectkey'].isin(train_subject_ids)]
-    val_df = df[df['subjectkey'].isin(val_subject_ids)]
+    train_df = pd.DataFrame([df[df['subjectkey'] == id].iloc[0] for id in train_subject_ids])
+    val_df = pd.DataFrame([df[df['subjectkey'] == id].iloc[0] for id in val_subject_ids])
 
     # Create class dictionaries
     train_classes = {col: train_df[col].values for col in possible_col}
     val_classes = {col: val_df[col].values for col in possible_col}
     all_classes = {col: df[col].values for col in possible_col}
+    print(train_classes["subjectkey"][:5])
+    print(val_classes["subjectkey"][:5])
+    
+    count = 0
+    for item in train_dataset:
+        print(f"Subject ID: {item[2]}")
+        count += 1
+        if count >= 5:
+            break
 
+    count = 0
+    for item in val_dataset:
+        print(f"Subject ID: {item[2]}")
+        count += 1
+        if count >= 5:
+            break
 
 def visualize_mri_features(dataset, classes, device, title, model_type='EnhancedVAE', checkpoint_path=None, 
                            latent_channels=256, random_state=42, perplexity=15, n_iter=1000, output_dir='../Visualization'):
@@ -208,7 +226,7 @@ def visualize_mri_features(dataset, classes, device, title, model_type='Enhanced
     print(f"Visualization saved as '{file_path}'")
 
 def visualize_abcd_features(dataset, classes, device, title, model_type='EnhancedVAE', 
-                             checkpoint_path=None, latent_channels=256, 
+                             checkpoint_path=None, config_path=None, latent_channels=256, 
                              random_state=42, perplexity=30, n_iter=1000, 
                              output_dir='../Visualization'):
     """
@@ -260,7 +278,14 @@ def visualize_abcd_features(dataset, classes, device, title, model_type='Enhance
     
     # Handle EncDiff model differently
     if model_type == 'EncDiff':
-        model = model_classes[model_type](in_channels=1, out_channels=1)
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        model, _ = create_encdiff_model(
+            config=config,
+            in_channels=config['in_channels'],
+            out_channels=config['out_channels'],
+            device=device
+        )
     else:
         model = model_classes[model_type](latent_channels=latent_channels)
     
@@ -276,10 +301,31 @@ def visualize_abcd_features(dataset, classes, device, title, model_type='Enhance
     
     model = model.to(device)
     model.eval()
+    print("done")
     
-    # Extract features
+    # Extract features 
+    features_list = []
     with torch.no_grad():
-        features, _ = model.visualize(dataset)
+        for i in range(0, len(dataset), 32):
+            batch = dataset[i:i + 32].to(device)
+            
+            if model_type == 'EncDiff':
+                batch_features, _ = model.encode_image(batch)
+            else:
+                batch_features, _ = model.visualize(batch)
+                
+            # Move batch results to CPU immediately
+            features_list.append(batch_features.cpu())
+            
+            if (i // 32) % 3 == 0:
+                print(f"Processed {i} samples")
+            # Clear cache after each batch
+            gc.collect()
+
+    print("done2")
+    # Concatenate all batches
+    features = torch.cat(features_list, dim=0)
+    print(features.shape)
     
     # Reshape features to 2D
     if len(features.shape) > 2:
@@ -288,13 +334,25 @@ def visualize_abcd_features(dataset, classes, device, title, model_type='Enhance
     else:
         features_reshaped = features
     
-    features_reshaped = features_reshaped.cpu().numpy()
+    features_reshaped = features_reshaped.to(device).numpy()
+    print(features_reshaped.shape)
+    print("Mean of each feature:", np.mean(features_reshaped, axis=0))
+    print("Variance of each feature:", np.var(features_reshaped, axis=0))
+
+    save_path = '../Visualization/paths/Braindataset/encdiff/64_train_features_reshaped.pt'
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)  # Ensure the directory exists
+
+    # Save the features
+    torch.save(features_reshaped, save_path)
+    print(f"Features saved to {save_path}")
     
     # Apply t-SNE
     tsne = TSNE(n_components=2, random_state=random_state, 
                 perplexity=min(perplexity, len(features_reshaped)-1), 
                 n_iter=n_iter)
     features_tsne = tsne.fit_transform(features_reshaped)
+    print("done3")
+    print(features_tsne.shape)
     
     # Prepare DataFrame for visualization
     df_tsne = pd.DataFrame({
@@ -352,29 +410,31 @@ if dataset.data.shape[0] == 105:
     visualize_mri_features(train_data, train_classes, device,
                         title='train',
                         model_type='EnhancedVAE', 
-                        checkpoint_path='../Visualization/paths/Echeckpoint_epoch_10000.pth',
+                        checkpoint_path='../Visualization/paths/MRIToy/Echeckpoint_epoch_10000.pth',
                         latent_channels=256)
 
     visualize_mri_features(val_data, val_classes, device,
                         title='test',
                         model_type='EnhancedVAE', 
                         perplexity=5,
-                        checkpoint_path='../Visualization/paths/Echeckpoint_epoch_10000.pth',
+                        checkpoint_path='../Visualization/paths/MRIToy/Echeckpoint_epoch_10000.pth',
                         latent_channels=256)
 else:
     visualize_abcd_features(train_data, train_classes, device,
                         title='train',
-                        model_type='EnhancedVAE', 
-                        checkpoint_path='../Visualization/paths/Braindataset/E32_Br_checkpoint_epoch_1500.pth',
+                        model_type='EncDiff', 
+                        checkpoint_path='../Visualization/paths/Braindataset/encdiff/64_encdiff_best_model.pth',
+                        config_path = "../Visualization/paths/Braindataset/encdiff/config.json",
                         latent_channels=32)
     
-     # Clear memory before validation
+    #  Clear memory before validation
     torch.cuda.empty_cache()
     gc.collect()
 
     visualize_abcd_features(val_data, val_classes, device,
                         title='test',
-                        model_type='EnhancedVAE', 
-                        perplexity=10,
-                        checkpoint_path='../Visualization/paths/Braindataset/E32_Br_checkpoint_epoch_1500.pth',
+                        model_type='EncDiff', 
+                        perplexity=15,
+                        checkpoint_path='../Visualization/paths/Braindataset/encdiff/64_encdiff_best_model.pth',
+                        config_path = "../Visualization/paths/Braindataset/encdiff/config.json",
                         latent_channels=32)

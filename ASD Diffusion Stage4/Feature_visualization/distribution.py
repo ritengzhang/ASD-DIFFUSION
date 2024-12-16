@@ -57,8 +57,8 @@ for i in range(len(val_dataset)):
     val_subject_ids.append(clean_id)
 
 # Match with CSV using subject IDs
-train_df = df[df['subjectkey'].isin(train_subject_ids)]
-val_df = df[df['subjectkey'].isin(val_subject_ids)]
+train_df = pd.DataFrame([df[df['subjectkey'] == id].iloc[0] for id in train_subject_ids])
+val_df = pd.DataFrame([df[df['subjectkey'] == id].iloc[0] for id in val_subject_ids])
 
 # Create class dictionaries
 train_classes = {col: train_df[col].values for col in possible_col}
